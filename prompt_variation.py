@@ -3,12 +3,15 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 import os
 import json
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+from typing import List, Dict
+from tqdm import tqdm
 import fire
 
 
-def extract_raw_data(raw_data_dir: str = "./법령지식", verbose: bool = False) -> dict:
+def extract_raw_data(raw_data_dir: str, verbose: bool) -> dict:
     """Extracts label and full_text pairs from JSON files in the specified directory."""
     result = {}
+    total_count = 0
     for file in os.listdir(raw_data_dir):
         if file.endswith(".json"):
             with open(os.path.join(raw_data_dir, file), "r") as f:
@@ -30,7 +33,8 @@ def extract_raw_data(raw_data_dir: str = "./법령지식", verbose: bool = False
                     print(
                         f"{count} out of {len(data)} were successfully extracted from {file}"
                     )
-    return result
+    total_count += count
+    return result, total_count
 
 
 def create_messages(label: str, full_text: str) -> dict:
@@ -96,10 +100,10 @@ def calculate_bleu(reference, hypothesis):
 
 
 def prompt_variation(
-    model_id: str = "meta-llama/Llama-3.1-8B-Instruct",
-    save_dir: str = "./results",
-    raw_data_dir: str = "./법령지식",
-    verbose: bool = False,
+    model_id: str,
+    save_dir: str,
+    raw_data_dir: str,
+    verbose: bool,
 ):
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     tokenizer.pad_token = tokenizer.eos_token
@@ -120,71 +124,135 @@ def prompt_variation(
         for file in os.listdir(save_dir):
             os.remove(os.path.join(save_dir, file))
 
-    for label, full_text in extract_raw_data(raw_data_dir, verbose).items():
-        messages_dict = create_messages(label, full_text)
-        for key, messages in messages_dict.items():
-            # Encode input with tokenizer
-            encoded = tokenizer.apply_chat_template(
-                messages,
-                tokenize=True,
-                return_tensors="pt",
-            )
+    id = 0
+    raw_data, total_count = extract_raw_data(raw_data_dir, verbose)
+    for label, full_text in raw_data.items():
+        # use tqdm for progress bar for id in tqdm(range(total_count))
+        for id in tqdm(range(total_count)):
+            messages_dict = create_messages(label, full_text)
+            for key, messages in messages_dict.items():
+                # Encode input with tokenizer
+                encoded = tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=True,
+                    return_tensors="pt",
+                )
 
-            # Create attention mask
-            attention_mask = torch.ones_like(encoded)
+                # Create attention mask
+                attention_mask = torch.ones_like(encoded)
 
-            # Move tensors to same device as model
-            inputs = encoded.to(model_device)
-            attention_mask = attention_mask.to(model_device)
+                # Move tensors to same device as model
+                inputs = encoded.to(model_device)
+                attention_mask = attention_mask.to(model_device)
 
-            # Generate response
-            outputs = model.generate(
-                inputs,
-                attention_mask=attention_mask,
-                max_new_tokens=256,
-                temperature=0.7,
-                do_sample=True,
-                pad_token_id=tokenizer.eos_token_id,
-            )
+                # Generate response
+                outputs = model.generate(
+                    inputs,
+                    attention_mask=attention_mask,
+                    max_new_tokens=256,
+                    temperature=0.7,
+                    do_sample=True,
+                    pad_token_id=tokenizer.eos_token_id,
+                )
 
-            # Decode response
-            response = tokenizer.decode(outputs[0], skip_special_tokens=True)
-            # Only keep the assistant's response
-            response = response.split("assistant\n\n")[-1]
+                # Decode response
+                response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+                # Only keep the assistant's response
+                response = response.split("assistant\n\n")[-1]
 
-            # Calculate BLEU score
-            bleu_score = calculate_bleu(full_text, response)
+                # Calculate BLEU score
+                bleu_score = calculate_bleu(full_text, response)
 
-            # Create entry dictionary
-            if key == "type1":
-                entry = {
-                    "prompt": label,
-                    "response": response,
-                    "golden truth": full_text,
-                    "bleu": bleu_score,
-                }
-            elif key == "type2":
-                entry = {
-                    "prompt": full_text,
-                    "response": response,
-                    "golden truth": label,
-                    "bleu": bleu_score,
-                }
-            else:
-                raise ValueError("Invalid key")
+                # Create entry dictionary
+                if key == "type1":
+                    entry = {
+                        "id": id,
+                        "prompt": label,
+                        "response": response,
+                        "golden": full_text,
+                        "bleu": bleu_score,
+                    }
+                elif key == "type2":
+                    entry = {
+                        "id": id,
+                        "prompt": full_text,
+                        "response": response,
+                        "golden": label,
+                        "bleu": bleu_score,
+                    }
+                else:
+                    print(f"Invalid key: {key}")
+                    continue
 
-            if verbose:
-                print(f"Processed entry for label: {label}")
+                if verbose:
+                    print(f"Processed entry for label: {label}")
 
-            # Save results to JSON file
-            try:
-                with open(f"{save_dir}/{key}.json", "a", encoding="utf-8") as f:
-                    json.dump(entry, f, ensure_ascii=False, indent=2)
-                    if verbose:
-                        print(f"Results saved to {save_dir}/{key}.json")
-            except Exception as e:
-                print(f"Error saving results: {e}")
+                # Save results to JSON file
+                try:
+                    with open(f"{save_dir}/{key}.json", "a", encoding="utf-8") as f:
+                        json.dump(entry, f, ensure_ascii=False, indent=2)
+                        if verbose:
+                            print(f"Results saved to {save_dir}/{key}.json")
+                except Exception as e:
+                    print(f"Error saving results: {e}")
+
+            id += 1
+
+
+def sort_avg(save_dir: str) -> List[Dict]:
+    bleu_data = {}
+    entry_data = {}  # Store complete entry information
+
+    # Read all JSON files in the save directory
+    for filename in os.listdir(save_dir):
+        if filename.endswith(".json"):
+            file_path = os.path.join(save_dir, filename)
+            with open(file_path, "r", encoding="utf-8") as f:
+                entries = json.load(f)
+                for entry in entries:
+                    entry_id = entry["id"]
+                    bleu_score = entry["bleu"]
+
+                    # Store BLEU scores for averaging
+                    if entry_id not in bleu_data:
+                        bleu_data[entry_id] = []
+                        entry_data[entry_id] = entry  # Store complete entry
+                    bleu_data[entry_id].append(bleu_score)
+
+    avg_bleu_data = []
+
+    # Calculate average BLEU scores and create new entries
+    for entry_id, scores in bleu_data.items():
+        avg_bleu = sum(scores) / len(scores)
+        # Create new entry with original data plus average BLEU
+        new_entry = {
+            "id": entry_id,
+            "avg_bleu": avg_bleu,
+        }
+        avg_bleu_data.append(new_entry)
+
+    # Sort entries by average BLEU score in descending order
+    sorted_avg_bleu_data = sorted(
+        avg_bleu_data, key=lambda x: x["avg_bleu"], reverse=True
+    )
+
+    # Save sorted data to JSON file
+    output_file = os.path.join(save_dir, "sorted_avg.json")
+    with open(output_file, "w", encoding="utf-8") as f:
+        json.dump(sorted_avg_bleu_data, f, ensure_ascii=False, indent=4)
+
+    return sorted_avg_bleu_data
+
+
+def main(
+    model_id: str = "meta-llama/Llama-3.1-8B-Instruct",
+    save_dir: str = "./results",
+    raw_data_dir: str = "./법령지식",
+    verbose: bool = False,
+):
+    prompt_variation(model_id, save_dir, raw_data_dir, verbose)
+    sort_avg(save_dir)
 
 
 if __name__ == "__main__":
-    fire.Fire(prompt_variation)
+    fire.Fire(main)
