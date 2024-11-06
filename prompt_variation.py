@@ -2,6 +2,7 @@ import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import os
 import json
+from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 import fire
 
 
@@ -64,6 +65,36 @@ def create_messages(label: str, full_text: str) -> dict:
     return messages_dict
 
 
+def calculate_bleu(reference, hypothesis):
+    chencherry = SmoothingFunction()
+    ref_tokens = reference.split()
+    hyp_tokens = hypothesis.split()
+
+    # Define length thresholds
+    SHORT_TEXT = 10  # tokens
+    MEDIUM_TEXT = 30  # tokens
+
+    # Get text lengths
+    ref_len = len(ref_tokens)
+    hyp_len = len(hyp_tokens)
+    max_len = max(ref_len, hyp_len)
+
+    # Choose n-gram weights based on text length
+    if max_len < SHORT_TEXT:
+        # For very short texts, focus on unigrams and bigrams
+        weights = (0.6, 0.4, 0, 0)
+    elif max_len < MEDIUM_TEXT:
+        # For medium texts, include trigrams
+        weights = (0.4, 0.3, 0.3, 0)
+    else:
+        # For longer texts, use all n-grams
+        weights = (0.25, 0.25, 0.25, 0.25)
+
+    return sentence_bleu(
+        [ref_tokens], hyp_tokens, weights=weights, smoothing_function=chencherry.method1
+    )
+
+
 def prompt_variation(
     model_id: str = "meta-llama/Llama-3.1-8B-Instruct",
     save_dir: str = "./results",
@@ -121,18 +152,23 @@ def prompt_variation(
             # Only keep the assistant's response
             response = response.split("assistant\n\n")[-1]
 
+            # Calculate BLEU score
+            bleu_score = calculate_bleu(full_text, response)
+
             # Create entry dictionary
             if key == "type1":
                 entry = {
                     "prompt": label,
                     "response": response,
                     "golden truth": full_text,
+                    "bleu": bleu_score,
                 }
             elif key == "type2":
                 entry = {
                     "prompt": full_text,
                     "response": response,
                     "golden truth": label,
+                    "bleu": bleu_score,
                 }
             else:
                 raise ValueError("Invalid key")
