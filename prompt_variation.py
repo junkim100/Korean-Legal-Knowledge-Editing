@@ -124,79 +124,92 @@ def prompt_variation(
         for file in os.listdir(save_dir):
             os.remove(os.path.join(save_dir, file))
 
+    type1_entries = []
+    type2_entries = []
+
     id = 0
     raw_data, total_count = extract_raw_data(raw_data_dir, verbose)
+    bar = tqdm(total=total_count, desc="Processing entries", unit="entry")
     for label, full_text in raw_data.items():
-        # use tqdm for progress bar for id in tqdm(range(total_count))
-        for id in tqdm(range(total_count)):
-            messages_dict = create_messages(label, full_text)
-            for key, messages in messages_dict.items():
-                # Encode input with tokenizer
-                encoded = tokenizer.apply_chat_template(
-                    messages,
-                    tokenize=True,
-                    return_tensors="pt",
-                )
+        messages_dict = create_messages(label, full_text)
+        for key, messages in messages_dict.items():
+            print(key, messages)
+            # Encode input with tokenizer
+            encoded = tokenizer.apply_chat_template(
+                messages,
+                tokenize=True,
+                return_tensors="pt",
+            )
 
-                # Create attention mask
-                attention_mask = torch.ones_like(encoded)
+            # Create attention mask
+            attention_mask = torch.ones_like(encoded)
 
-                # Move tensors to same device as model
-                inputs = encoded.to(model_device)
-                attention_mask = attention_mask.to(model_device)
+            # Move tensors to same device as model
+            inputs = encoded.to(model_device)
+            attention_mask = attention_mask.to(model_device)
 
-                # Generate response
-                outputs = model.generate(
-                    inputs,
-                    attention_mask=attention_mask,
-                    max_new_tokens=256,
-                    temperature=0.7,
-                    do_sample=True,
-                    pad_token_id=tokenizer.eos_token_id,
-                )
+            # Generate response
+            outputs = model.generate(
+                inputs,
+                attention_mask=attention_mask,
+                max_new_tokens=256,
+                temperature=0.7,
+                do_sample=True,
+                pad_token_id=tokenizer.eos_token_id,
+            )
 
-                # Decode response
-                response = tokenizer.decode(outputs[0], skip_special_tokens=True)
-                # Only keep the assistant's response
-                response = response.split("assistant\n\n")[-1]
+            # Decode response
+            response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+            # Only keep the assistant's response
+            response = response.split("assistant\n\n")[-1]
 
-                # Calculate BLEU score
-                bleu_score = calculate_bleu(full_text, response)
+            # Calculate BLEU score
+            bleu_score = calculate_bleu(full_text, response)
 
-                # Create entry dictionary
-                if key == "type1":
-                    entry = {
-                        "id": id,
-                        "prompt": label,
-                        "response": response,
-                        "golden": full_text,
-                        "bleu": bleu_score,
-                    }
-                elif key == "type2":
-                    entry = {
-                        "id": id,
-                        "prompt": full_text,
-                        "response": response,
-                        "golden": label,
-                        "bleu": bleu_score,
-                    }
-                else:
-                    print(f"Invalid key: {key}")
-                    continue
+            # Create entry dictionary
+            if key == "type1":
+                entry = {
+                    "id": id,
+                    "prompt": label,
+                    "response": response,
+                    "golden": full_text,
+                    "bleu": bleu_score,
+                }
+                type1_entries.append(entry)
+            elif key == "type2":
+                entry = {
+                    "id": id,
+                    "prompt": full_text,
+                    "response": response,
+                    "golden": label,
+                    "bleu": bleu_score,
+                }
+                type2_entries.append(entry)
+            else:
+                print(f"Invalid key: {key}")
+                continue
 
-                if verbose:
-                    print(f"Processed entry for label: {label}")
+            if verbose:
+                print(f"Processed entry for label: {label}")
 
-                # Save results to JSON file
-                try:
-                    with open(f"{save_dir}/{key}.json", "a", encoding="utf-8") as f:
-                        json.dump(entry, f, ensure_ascii=False, indent=2)
-                        if verbose:
-                            print(f"Results saved to {save_dir}/{key}.json")
-                except Exception as e:
-                    print(f"Error saving results: {e}")
+        id += 1
+        bar.update(1)
 
-            id += 1
+    # Save accumulated results to JSON files
+    try:
+        if type1_entries:
+            with open(f"{save_dir}/type1.json", "w", encoding="utf-8") as f:
+                json.dump(type1_entries, f, ensure_ascii=False, indent=2)
+            if verbose:
+                print(f"Results saved to {save_dir}/type1.json")
+
+        if type2_entries:
+            with open(f"{save_dir}/type2.json", "w", encoding="utf-8") as f:
+                json.dump(type2_entries, f, ensure_ascii=False, indent=2)
+            if verbose:
+                print(f"Results saved to {save_dir}/type2.json")
+    except Exception as e:
+        print(f"Error saving results: {e}")
 
 
 def sort_avg(save_dir: str) -> List[Dict]:
@@ -239,7 +252,7 @@ def sort_avg(save_dir: str) -> List[Dict]:
     # Save sorted data to JSON file
     output_file = os.path.join(save_dir, "sorted_avg.json")
     with open(output_file, "w", encoding="utf-8") as f:
-        json.dump(sorted_avg_bleu_data, f, ensure_ascii=False, indent=4)
+        json.dump(sorted_avg_bleu_data, f, ensure_ascii=False, indent=2)
 
     return sorted_avg_bleu_data
 
